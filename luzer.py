@@ -22,6 +22,8 @@ def get_week_range():
     today = datetime.date.today()
     # + 1 since our weeks start on Sunday, not Monday :)
     start = today - datetime.timedelta(days=today.weekday() + 1)
+    if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
+        start += datetime.timedelta(days=7)
     end = start + datetime.timedelta(days=6)
     return date_range(start, end)
 
@@ -86,8 +88,8 @@ def copy_event(event):
 
 
 def parse_config():
-    if len(sys.argv) != 2:
-        raise RuntimeError(f'Usage: {sys.argv[0]} <config_json>')
+    if len(sys.argv) < 2:
+        raise RuntimeError(f'Usage: {sys.argv[0]} <config_json> [--next-week]')
 
     config_path = sys.argv[1]
     with open(config_path, 'rb') as config_stream:
