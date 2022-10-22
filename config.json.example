@@ -1,0 +1,12 @@
+{
+  "creds_file": "credentials.json",
+  "creds_cache": "token.json",
+  "master_id": "",
+  "shadow_calendars": [
+    {
+      "name": "shadow_1_test",
+      "id": "",
+      "marking": "#1"
+    }
+  ]
+}

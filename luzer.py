@@ -1,49 +1,127 @@
 #!/usr/bin/env python3
-import requests
+import os
+import datetime
+from collections import namedtuple
+import json
+import sys
 
-# Read all events from a hardcoded master
-
-# Create events in a hardcoded shadow
-
-# Delete evnets in a hardcoded shadow
-
-# Transfer events from a hardcoded master to multiple hardcoded shadows
-
-# Gather master and shadows from a config file
-
-
-API_BASE = 'https://www.googleapis.com/calendar/v3'
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
-MASTER_ID = 'f560d2b75e5aba53d1c78d50c413d589149a05be9c5efebec28398e350c26161@group.calendar.google.com'
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 
-def get_event_ids(calendar_id):
-    requests_fmt = f'{API_BASE}/calendars/{calendar_id}/events'
-    print(requests_fmt)
-    resp = requests.get(requests_fmt, headers={})
-    print(resp)
-    print(dir(resp))
+date_range = namedtuple('date_range', ('start', 'end'))
 
 
-def get_event_data(calendar_id, event_id):
-    requests_fmt = 'GET /calendars/{calendar_id}/events/{event_id}'
+def get_week_range():
+    today = datetime.date.today()
+    # + 1 since our weeks start on Sunday, not Monday :)
+    start = today - datetime.timedelta(days=today.weekday() + 1)
+    end = start + datetime.timedelta(days=6)
+    return date_range(start, end)
 
 
-def get_events(calendar_id):
-    pass
+def date_range_to_utc_time(dates):
+    # TODO: make timezone change automatically!!!
+    start_time = dates.start.isoformat() + 'T00:00:00.000000+03:00'
+    end_time = dates.end.isoformat() + 'T23:59:59.999999+03:00'
+    return start_time, end_time
 
 
-def create_event(calendar_id, event):
-    requests_fmt = 'POST /calendars/{calendar_id}/events'
+class Service():
+    def __init__(self, scopes, config):
+        creds = None
+        if os.path.exists(config['creds_cache']):
+            creds = Credentials.from_authorized_user_file(config['creds_cache'], scopes)
+            
+        if creds is None or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(config['creds_file'], scopes)
+            creds = flow.run_local_server(port=0)
+            with open(config['creds_cache'], 'w') as token:
+                token.write(creds.to_json())
+
+        if creds is None or not creds.valid:
+            raise RuntimeError(f'Failed to authenticate using {config["creds_file"]}')
+
+        self._service = build('calendar', 'v3', credentials=creds)
+        print('[+] Authenticated')
 
 
-def remove_event(calendar_id, event_id):
-    requests_fmt = 'DELETE /calendars/{calendar_id}/events/{event_id}'
+    def get_events(self, calendar_id, dates=None):
+        if dates is None:
+            events_query = self._service.events().list(calendarId=calendar_id)
+        else:
+            start_time, end_time = date_range_to_utc_time(dates)
+            events_query = self._service.events().list(calendarId=calendar_id, timeMin=start_time, timeMax=end_time)
+
+        return events_query.execute().get('items')
+
+
+    def create_event(self, calendar_id, event):
+        self._service.events().insert(calendarId=calendar_id, body=event).execute()
+
+    def delete_event(self, calendar_id, event_id):
+        self._service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+
+
+def delete_calendar_events_range(service, calendar_id, dates):
+    for event in service.get_events(calendar_id, dates):
+        service.delete_event(calendar_id, event['id'])
+
+
+def copy_event(event):
+    copy = dict()
+    copy['summary'] = event['summary']
+    copy['start'] = event['start']
+    copy['end'] = event['end']
+    if event.get('location', None) is not None:
+        copy['location'] = event['location']
+        
+    return copy
+
+
+def parse_config():
+    if len(sys.argv) != 2:
+        raise RuntimeError(f'Usage: {sys.argv[0]} <config_json>')
+
+    config_path = sys.argv[1]
+    with open(config_path, 'rb') as config_stream:
+        config = json.load(config_stream)
+
+    return config
 
 
 def main():
-    get_event_ids(MASTER_ID)
+    config = parse_config()
+    
+    this_week = get_week_range()
+    print(f'[+] Working on week {this_week}')
+    service = Service(SCOPES, config)
+    
+    print('[+] Deleting events from shadow calendars')
+    for shadow in config['shadow_calendars']:
+       delete_calendar_events_range(service, shadow['id'], this_week)
+    
+    print('[+] Retrieving events from master')
+    events = service.get_events(config['master_id'], dates=this_week)
+    print(f'[+] Got {len(events)} events in the current week')
+
+    shadow_meta = namedtuple('shadow_meta', ('name', 'id'))
+    markings_to_shadows = {shadow['marking']: shadow_meta(shadow['name'], shadow['id']) for shadow in config['shadow_calendars']}
+
+    for event in events:
+        if event.get('summary', None) is None:
+           continue 
+        
+        for marking, shadow in markings_to_shadows.items():
+            if marking in event.get('description', ''):
+                print(f'[+] Copying {event["summary"]} to {shadow.name}')
+                service.create_event(shadow.id, copy_event(event))
 
 
 if __name__ == '__main__':
