@@ -156,6 +156,7 @@ def main():
     for event in master_events:
         if event.get('summary', None) is None:
             print(f'[-] Event {event} does not contain summery')
+            continue
 
         for marking, shadow in markings_to_shadows.items():
             if marking in event.get('description', ''):
