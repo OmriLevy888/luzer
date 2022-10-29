@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 import os
 import datetime
+import pytz
 from collections import namedtuple
 import json
 import sys
+
+import recurring_ical_events
+import icalendar
+import requests
+import urllib
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -24,7 +30,7 @@ def get_week_range():
     start = today - datetime.timedelta(days=today.weekday() + 1)
     if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
         start += datetime.timedelta(days=7)
-    end = start + datetime.timedelta(days=6)
+    end = start + datetime.timedelta(days=7) # recurring_ical_events between method is exclusive on end range
     return date_range(start, end)
 
 
@@ -35,34 +41,75 @@ def date_range_to_utc_time(dates):
     return start_time, end_time
 
 
+def localize_datetime(dtime):
+    timezone = datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo
+    tz_offset = timezone.utcoffset(dtime)
+    return dtime + tz_offset
+
+
+class ICal():
+    def __init__(self, config):
+        # Perfer remote ics over locl
+        if len(config.get('master_ical_url', '')) == 0:
+            with open(config['master_ical_path'], 'r') as ical_f:
+                print(f'[!] Using local ICal file {config["master_ical_path"]}')
+                self._ical = icalendar.Calendar.from_ical(ical_f.read())
+        else:
+            print('[+] Using remote ICal file')
+            ical_string = urllib.request.urlopen(config['master_ical_url']).read()
+            self._ical = icalendar.Calendar.from_ical(ical_string)
+
+    def write(self, out_ical_path: str) -> None:
+        raise NotImplementedError()
+
+    def get_ical_events(self, dates: date_range = None):
+        if dates is None:
+            for event in recurring_ical_events.of(self._ical):
+                yield event
+        else:
+            for event in recurring_ical_events.of(self._ical).between(*dates):
+                yield event
+
+    def get_luzer_events(self, dates: date_range = None):
+        return ({
+                'summary': ical_e['SUMMARY'],
+                'start': ical_e['DTSTART'].dt.strftime('%c'),
+                'end': ical_e['DTEND'].dt.strftime('%c'),
+                'description': ical_e.get('DESCRIPTION', ''),
+                'location': ical_e.get('LOCATION', ''),
+        } for ical_e in self.get_ical_events(dates))
+
+
 class Service():
     def __init__(self, scopes, config):
         creds = None
         if os.path.exists(config['creds_cache']):
-            creds = Credentials.from_authorized_user_file(config['creds_cache'], scopes)
-            
+            creds = Credentials.from_authorized_user_file(
+                config['creds_cache'], scopes)
+
         if creds is None or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(config['creds_file'], scopes)
+            flow = InstalledAppFlow.from_client_secrets_file(
+                config['creds_file'], scopes)
             creds = flow.run_local_server(port=0)
             with open(config['creds_cache'], 'w') as token:
                 token.write(creds.to_json())
 
         if creds is None or not creds.valid:
-            raise RuntimeError(f'Failed to authenticate using {config["creds_file"]}')
+            raise RuntimeError(
+                f'Failed to authenticate using {config["creds_file"]}')
 
         self._service = build('calendar', 'v3', credentials=creds)
         print('[+] Authenticated')
-
 
     def get_events(self, calendar_id, dates=None):
         if dates is None:
             events_query = self._service.events().list(calendarId=calendar_id)
         else:
             start_time, end_time = date_range_to_utc_time(dates)
-            events_query = self._service.events().list(calendarId=calendar_id, timeMin=start_time, timeMax=end_time)
+            events_query = self._service.events().list(
+                calendarId=calendar_id, timeMin=start_time, timeMax=end_time)
 
         return events_query.execute().get('items')
-
 
     def create_event(self, calendar_id, event):
         self._service.events().insert(calendarId=calendar_id, body=event).execute()
@@ -77,13 +124,14 @@ def delete_calendar_events_range(service, calendar_id, dates):
 
 
 def copy_event(event):
+    # return copy.deepcopy(event) ?
     copy = dict()
     copy['summary'] = event['summary']
     copy['start'] = event['start']
     copy['end'] = event['end']
     if event.get('location', None) is not None:
         copy['location'] = event['location']
-        
+
     return copy
 
 
@@ -100,26 +148,26 @@ def parse_config():
 
 def main():
     config = parse_config()
-    
+
+    master_ical = ICal(config)
     this_week = get_week_range()
     print(f'[+] Working on week {this_week}')
-    service = Service(SCOPES, config)
-    
-    print('[+] Deleting events from shadow calendars')
-    for shadow in config['shadow_calendars']:
-       delete_calendar_events_range(service, shadow['id'], this_week)
-    
+
     print('[+] Retrieving events from master')
-    events = service.get_events(config['master_id'], dates=this_week)
-    print(f'[+] Got {len(events)} events in the current week')
+    master_events = master_ical.get_luzer_events(this_week)
+    for event in master_events:
+        print(event['summary'], event['start'], event['end'])
+    return
 
     shadow_meta = namedtuple('shadow_meta', ('name', 'id'))
-    markings_to_shadows = {shadow['marking']: shadow_meta(shadow['name'], shadow['id']) for shadow in config['shadow_calendars']}
+    markings_to_shadows = {shadow['marking']: shadow_meta(
+        shadow['name'], shadow['id']) for shadow in config['shadow_calendars']}
 
-    for event in events:
+    for event in master_events:
         if event.get('summary', None) is None:
-           continue 
-        
+            print(f'[-] Event {event} does not contain summery')
+            continue
+
         for marking, shadow in markings_to_shadows.items():
             if marking in event.get('description', ''):
                 print(f'[+] Copying {event["summary"]} to {shadow.name}')

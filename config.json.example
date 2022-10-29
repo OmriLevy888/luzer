@@ -1,6 +1,8 @@
 {
   "creds_file": "credentials.json",
   "creds_cache": "token.json",
+  "master_ical_path": "",
+  "master_ical_url": "",
   "master_id": "",
   "shadow_calendars": [
     {
