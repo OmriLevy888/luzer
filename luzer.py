@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import datetime
+import pytz
 from collections import namedtuple
 import json
 import sys
@@ -36,12 +37,19 @@ def date_range_to_utc_time(dates):
     return start_time, end_time
 
 
+def get_event_begin_tz_correct(event):
+    timezone = datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo
+    tz_offset = timezone.utcoffset(event.begin.datetime)
+    fixed_begin = event.begin.datetime + tz_offset
+    return fixed_begin.date()
+
+
 class ICS():
     def __init__(self, config):
         # Perfer remote ics over locl
-        if config.get('master_ics_url', None) is None:
+        if len(config.get('master_ics_url', '')) == 0:
             with open(config['master_ics_path'], 'r') as ics_f:
-                print('[!] Using local ICS file')
+                print(f'[!] Using local ICS file {config["master_ics_path"]}')
                 self._ics = ics.Calendar(ics_f.read())
         else:
             print('[+] Using remote ICS file')
@@ -53,8 +61,7 @@ class ICS():
 
     def get_ics_events(self, dates: date_range = None):
         if dates:
-            # Yeah, fuckit
-            return filter(lambda e: e.begin.datetime.date() >= dates.start and e.end.datetime.date() <= dates.end, self._ics.events)
+            return filter(lambda e: dates.start <= get_event_begin_tz_correct(e) <= dates.end, self._ics.events)
         return self._ics.timeline  # Generator of events
 
     def get_luzer_events(self, dates: date_range = None):
@@ -133,21 +140,24 @@ def parse_config():
 def main():
     config = parse_config()
 
-    service = Service(SCOPES, config)
+    # service = Service(SCOPES, config)
     master_ics = ICS(config)
 
     this_week = get_week_range()
     print(f'[+] Working on week {this_week}')
 
-    print('[+] Deleting events from shadow calendars')
-    for shadow in config['shadow_calendars']:
-        delete_calendar_events_range(service, shadow['id'], this_week)
+    # print('[+] Deleting events from shadow calendars')
+    # for shadow in config['shadow_calendars']:
+    #     delete_calendar_events_range(service, shadow['id'], this_week)
 
     print('[+] Retrieving events from master')
     # master_events = service.get_events(config['master_id'], this_week)
     master_events = list(master_ics.get_luzer_events(this_week))
     # Without this log we can do it lazy.
     print(f'[+] Got {len(master_events)} events in the current week')
+    for event in master_events:
+        print(event['summary'])
+    return
 
     shadow_meta = namedtuple('shadow_meta', ('name', 'id'))
     markings_to_shadows = {shadow['marking']: shadow_meta(
