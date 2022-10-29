@@ -21,19 +21,6 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 
-date_range = namedtuple('date_range', ('start', 'end'))
-
-
-def get_week_range():
-    today = datetime.date.today()
-    # + 1 since our weeks start on Sunday, not Monday :)
-    start = today - datetime.timedelta(days=today.weekday() + 1)
-    if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
-        start += datetime.timedelta(days=7)
-    end = start + datetime.timedelta(days=7) # recurring_ical_events between method is exclusive on end range
-    return date_range(start, end)
-
-
 def date_range_to_utc_time(dates):
     # TODO: make timezone change automatically!!!
     start_time = dates.start.isoformat() + 'T00:00:00.000000+03:00'
@@ -59,10 +46,10 @@ class ICal():
             ical_string = urllib.request.urlopen(config['master_ical_url']).read()
             self._ical = icalendar.Calendar.from_ical(ical_string)
 
-    def write(self, out_ical_path: str) -> None:
+    def write(self, out_ical_path):
         raise NotImplementedError()
 
-    def get_ical_events(self, dates: date_range = None):
+    def get_ical_events(self, dates=None):
         if dates is None:
             for event in recurring_ical_events.of(self._ical):
                 yield event
@@ -70,7 +57,7 @@ class ICal():
             for event in recurring_ical_events.of(self._ical).between(*dates):
                 yield event
 
-    def get_luzer_events(self, dates: date_range = None):
+    def get_luzer_events(self, dates=None):
         return ({
                 'summary': ical_e['SUMMARY'],
                 'start': ical_e['DTSTART'].dt.strftime('%c'),
@@ -146,15 +133,29 @@ def parse_config():
     return config
 
 
+date_range = namedtuple('date_range', ('start', 'end'))
+
+
+def get_week_range():
+    today = datetime.date.today()
+    # + 1 since our weeks start on Sunday, not Monday :)
+    start = today - datetime.timedelta(days=today.weekday() + 1)
+    if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
+        start += datetime.timedelta(days=7)
+    # recurring_ical_events between method is exclusive on end range
+    end = start + datetime.timedelta(days=7) 
+    return date_range(start, end)
+
+
 def main():
     config = parse_config()
 
     master_ical = ICal(config)
-    this_week = get_week_range()
-    print(f'[+] Working on week {this_week}')
+    dates = get_week_range()
+    print(f'[+] Working on {dates}')
 
     print('[+] Retrieving events from master')
-    master_events = master_ical.get_luzer_events(this_week)
+    master_events = master_ical.get_luzer_events(dates)
     for event in master_events:
         print(event['summary'], event['start'], event['end'])
     return
