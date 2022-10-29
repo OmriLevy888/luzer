@@ -21,13 +21,6 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 
-def date_range_to_utc_time(dates):
-    # TODO: make timezone change automatically!!!
-    start_time = dates.start.isoformat() + 'T00:00:00.000000+03:00'
-    end_time = dates.end.isoformat() + 'T23:59:59.999999+03:00'
-    return start_time, end_time
-
-
 def localize_datetime(dtime):
     timezone = datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo
     tz_offset = timezone.utcoffset(dtime)
@@ -35,19 +28,13 @@ def localize_datetime(dtime):
 
 
 class ICal():
-    def __init__(self, config):
-        # Perfer remote ics over locl
-        if len(config.get('master_ical_url', '')) == 0:
-            with open(config['master_ical_path'], 'r') as ical_f:
-                print(f'[!] Using local ICal file {config["master_ical_path"]}')
-                self._ical = icalendar.Calendar.from_ical(ical_f.read())
-        else:
-            print('[+] Using remote ICal file')
-            ical_string = urllib.request.urlopen(config['master_ical_url']).read()
-            self._ical = icalendar.Calendar.from_ical(ical_string)
-
-    def write(self, out_ical_path):
-        raise NotImplementedError()
+    def __init__(self, ical):
+        self._ical = ical
+    
+    @classmethod
+    def from_url(cls, url):
+        ical_string = urllib.request.urlopen(url).read()
+        return cls(icalendar.Calendar.from_ical(ical_string))
 
     def get_ical_events(self, dates=None):
         if dates is None:
@@ -58,12 +45,16 @@ class ICal():
                 yield event
 
     def get_luzer_events(self, dates=None):
+        def parse_datetime(dt):
+            return {'dateTime': dt.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'timeZone': str(dt.tzinfo)}
+        
         return ({
-                'summary': ical_e['SUMMARY'],
-                'start': ical_e['DTSTART'].dt.strftime('%c'),
-                'end': ical_e['DTEND'].dt.strftime('%c'),
-                'description': ical_e.get('DESCRIPTION', ''),
-                'location': ical_e.get('LOCATION', ''),
+                'summary': str(ical_e['SUMMARY']),
+                'start': parse_datetime(ical_e['DTSTART'].dt),
+                'end': parse_datetime(ical_e['DTEND'].dt),
+                'description': str(ical_e.get('DESCRIPTION', '')),
+                'location': str(ical_e.get('LOCATION', '')),
         } for ical_e in self.get_ical_events(dates))
 
 
@@ -88,38 +79,36 @@ class Service():
         self._service = build('calendar', 'v3', credentials=creds)
         print('[+] Authenticated')
 
-    def get_events(self, calendar_id, dates=None):
+    def get_events(self, calendar_id, dates=None, max_results=1000):
+        def to_google_format(d):
+            start, end = d
+            
+            timezone = datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo
+            tz_offset = timezone.utcoffset(datetime.datetime.now())
+            sign = '+' if tz_offset.days >= 0 and tz_offset.seconds >= 0 else '-'
+            hours = str(tz_offset.seconds // (60 ** 2)).zfill(2)
+            minutes = str((tz_offset.seconds // 60) % 60).zfill(2)
+            
+            format_date = lambda dt: dt.strftime(f'%Y-%m-%dT00:00:00{sign}{hours}:{minutes}')
+            return (format_date(start), format_date(end))
+        
         if dates is None:
-            events_query = self._service.events().list(calendarId=calendar_id)
+            events_query = self._service.events().list(calendarId=calendar_id, maxResults=max_results)
         else:
-            start_time, end_time = date_range_to_utc_time(dates)
+            start_time, end_time = to_google_format(dates)
             events_query = self._service.events().list(
-                calendarId=calendar_id, timeMin=start_time, timeMax=end_time)
-
+                    calendarId=calendar_id, timeMin=start_time, timeMax=end_time, maxResults=max_results)
+        
         return events_query.execute().get('items')
 
-    def create_event(self, calendar_id, event):
-        self._service.events().insert(calendarId=calendar_id, body=event).execute()
+    def make_batch_request(self):
+        return self._service.new_batch_http_request()
 
-    def delete_event(self, calendar_id, event_id):
-        self._service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+    def make_create_event_request(self, calendar_id, event):
+        return self._service.events().insert(calendarId=calendar_id, body=event)
 
-
-def delete_calendar_events_range(service, calendar_id, dates):
-    for event in service.get_events(calendar_id, dates):
-        service.delete_event(calendar_id, event['id'])
-
-
-def copy_event(event):
-    # return copy.deepcopy(event) ?
-    copy = dict()
-    copy['summary'] = event['summary']
-    copy['start'] = event['start']
-    copy['end'] = event['end']
-    if event.get('location', None) is not None:
-        copy['location'] = event['location']
-
-    return copy
+    def make_delete_event_request(self, calendar_id, event_id):
+        return self._service.events().delete(calendarId=calendar_id, eventId=event_id)
 
 
 def parse_config():
@@ -147,32 +136,48 @@ def get_week_range():
     return date_range(start, end)
 
 
+def filter_event(event):
+    return {
+        'summary': event['summary'],
+        'location': event.get('location', None),
+        'start': event['start'],
+        'end': event['end'],
+    }
+
+
 def main():
     config = parse_config()
+    service = Service(SCOPES, config)
 
-    master_ical = ICal(config)
+    master_ical = ICal.from_url(config['master_ical_url'])
     dates = get_week_range()
     print(f'[+] Working on {dates}')
 
     print('[+] Retrieving events from master')
-    master_events = master_ical.get_luzer_events(dates)
-    for event in master_events:
-        print(event['summary'], event['start'], event['end'])
-    return
+    master_events = [(event, filter_event(event)) for event in master_ical.get_luzer_events(dates)]
 
-    shadow_meta = namedtuple('shadow_meta', ('name', 'id'))
-    markings_to_shadows = {shadow['marking']: shadow_meta(
-        shadow['name'], shadow['id']) for shadow in config['shadow_calendars']}
+    print('[+] Deleteing events from shadow calendars')
+    for shadow in config['shadow_calendars']:
+        batch_request = service.make_batch_request()
+        shadow_id = shadow['id']
+        
+        for event in service.get_events(shadow_id, dates):
+            batch_request.add(service.make_delete_event_request(shadow_id, event['id']))
+            
+        batch_request.execute()
 
-    for event in master_events:
-        if event.get('summary', None) is None:
-            print(f'[-] Event {event} does not contain summery')
-            continue
-
-        for marking, shadow in markings_to_shadows.items():
-            if marking in event.get('description', ''):
-                print(f'[+] Copying {event["summary"]} to {shadow.name}')
-                service.create_event(shadow.id, copy_event(event))
+    print('[+] Copying new events to shadow calendars')
+    for shadow in config['shadow_calendars']:
+        batch_request = service.make_batch_request()
+        shadow_id = shadow['id']
+        shadow_marking = shadow['marking']
+        
+        for event, filtered_event in master_events:
+            if shadow_marking in event.get('description', ''):
+                batch_request.add(service.make_create_event_request(shadow_id, filtered_event))
+        batch_request.execute()
+            
+    print('[+] Done')
 
 
 if __name__ == '__main__':
