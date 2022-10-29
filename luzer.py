@@ -5,8 +5,12 @@ import pytz
 from collections import namedtuple
 import json
 import sys
-import ics
+
+import recurring_ical_events
+import icalendar
 import requests
+import urllib
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -26,7 +30,7 @@ def get_week_range():
     start = today - datetime.timedelta(days=today.weekday() + 1)
     if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
         start += datetime.timedelta(days=7)
-    end = start + datetime.timedelta(days=6)
+    end = start + datetime.timedelta(days=7) # recurring_ical_events between method is exclusive on end range
     return date_range(start, end)
 
 
@@ -37,38 +41,43 @@ def date_range_to_utc_time(dates):
     return start_time, end_time
 
 
-def get_event_begin_tz_correct(event):
+def localize_datetime(dtime):
     timezone = datetime.datetime.now(datetime.timezone.utc).astimezone().tzinfo
-    tz_offset = timezone.utcoffset(event.begin.datetime)
-    fixed_begin = event.begin.datetime + tz_offset
-    return fixed_begin.date()
+    tz_offset = timezone.utcoffset(dtime)
+    return dtime + tz_offset
 
 
-class ICS():
+class ICal():
     def __init__(self, config):
         # Perfer remote ics over locl
-        if len(config.get('master_ics_url', '')) == 0:
-            with open(config['master_ics_path'], 'r') as ics_f:
-                print(f'[!] Using local ICS file {config["master_ics_path"]}')
-                self._ics = ics.Calendar(ics_f.read())
+        if len(config.get('master_ical_url', '')) == 0:
+            with open(config['master_ical_path'], 'r') as ical_f:
+                print(f'[!] Using local ICal file {config["master_ical_path"]}')
+                self._ical = icalendar.Calendar.from_ical(ical_f.read())
         else:
-            print('[+] Using remote ICS file')
-            self._ics = ics.Calendar(
-                requests.get(config['master_ics_url']).text)
+            print('[+] Using remote ICal file')
+            ical_string = urllib.request.urlopen(config['master_ical_url']).read()
+            self._ical = icalendar.Calendar.from_ical(ical_string)
 
-    def write(self, out_ics_path: str) -> None:
+    def write(self, out_ical_path: str) -> None:
         raise NotImplementedError()
 
-    def get_ics_events(self, dates: date_range = None):
-        if dates:
-            return filter(lambda e: dates.start <= get_event_begin_tz_correct(e) <= dates.end, self._ics.events)
-        return self._ics.timeline  # Generator of events
+    def get_ical_events(self, dates: date_range = None):
+        if dates is None:
+            for event in recurring_ical_events.of(self._ical):
+                yield event
+        else:
+            for event in recurring_ical_events.of(self._ical).between(*dates):
+                yield event
 
     def get_luzer_events(self, dates: date_range = None):
-        # Normalize ICS events
-        return map(lambda ics_e: {'summary': ics_e.name, 'start': {'date': ics_e.begin.strftime('%c')}, 'end': {'date': ics_e.end.strftime('%c')},
-                                  'description': ics_e.description or '',
-                                  'location': ics_e.location}, self.get_ics_events(dates))
+        return ({
+                'summary': ical_e['SUMMARY'],
+                'start': ical_e['DTSTART'].dt.strftime('%c'),
+                'end': ical_e['DTEND'].dt.strftime('%c'),
+                'description': ical_e.get('DESCRIPTION', ''),
+                'location': ical_e.get('LOCATION', ''),
+        } for ical_e in self.get_ical_events(dates))
 
 
 class Service():
@@ -140,23 +149,14 @@ def parse_config():
 def main():
     config = parse_config()
 
-    # service = Service(SCOPES, config)
-    master_ics = ICS(config)
-
+    master_ical = ICal(config)
     this_week = get_week_range()
     print(f'[+] Working on week {this_week}')
 
-    # print('[+] Deleting events from shadow calendars')
-    # for shadow in config['shadow_calendars']:
-    #     delete_calendar_events_range(service, shadow['id'], this_week)
-
     print('[+] Retrieving events from master')
-    # master_events = service.get_events(config['master_id'], this_week)
-    master_events = list(master_ics.get_luzer_events(this_week))
-    # Without this log we can do it lazy.
-    print(f'[+] Got {len(master_events)} events in the current week')
+    master_events = master_ical.get_luzer_events(this_week)
     for event in master_events:
-        print(event['summary'])
+        print(event['summary'], event['start'], event['end'])
     return
 
     shadow_meta = namedtuple('shadow_meta', ('name', 'id'))
