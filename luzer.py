@@ -113,7 +113,11 @@ class Service():
 
 def parse_config():
     if len(sys.argv) < 2:
-        raise RuntimeError(f'Usage: {sys.argv[0]} <config_json> [--next-week]')
+        print(f'Usage: {sys.argv[0]} <config_json> [--next] [--day]')
+        print( 'config_json: config file')
+        print( '--next: work on the next range')
+        print( '--day: work on a range of a single day, default is a week')
+        sys.exit(1)
 
     config_path = sys.argv[1]
     with open(config_path, 'rb') as config_stream:
@@ -125,14 +129,20 @@ def parse_config():
 date_range = namedtuple('date_range', ('start', 'end'))
 
 
-def get_week_range():
+def get_working_dates():
     today = datetime.date.today()
     # + 1 since our weeks start on Sunday, not Monday :)
     start = today - datetime.timedelta(days=today.weekday() + 1)
-    if len(sys.argv) == 3 and sys.argv[2] == '--next-week':
-        start += datetime.timedelta(days=7)
+    if '--day' in sys.argv:
+        start = today
+
+    range_days = 7 if '--day' not in sys.argv else 1
+    
+    if '--next' in sys.argv:
+        start += datetime.timedelta(days=range_days)
+    
     # recurring_ical_events between method is exclusive on end range
-    end = start + datetime.timedelta(days=7) 
+    end = start + datetime.timedelta(days=range_days) 
     return date_range(start, end)
 
 
@@ -150,7 +160,7 @@ def main():
     service = Service(SCOPES, config)
 
     master_ical = ICal.from_url(config['master_ical_url'])
-    dates = get_week_range()
+    dates = get_working_dates()
     print(f'[+] Working on {dates}')
 
     print('[+] Retrieving events from master')
